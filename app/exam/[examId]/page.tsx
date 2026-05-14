@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/supabase/require-auth";
+import { SHARED_USER_ID } from "@/lib/shared-user";
 import { pickNext } from "@/lib/coach/next";
 import { mass } from "@/lib/coach/scoring";
 import { DEFAULT_ALGO_ID } from "@/lib/coach/algos";
@@ -50,11 +51,13 @@ export default async function ExamPage({
     supabase
       .from("fact_state")
       .select("fact_id, understanding, attempts_count")
-      .eq("exam_id", examId),
+      .eq("exam_id", examId)
+      .eq("user_id", SHARED_USER_ID),
     supabase
       .from("attempts")
       .select("correct")
       .eq("exam_id", examId)
+      .eq("user_id", SHARED_USER_ID)
       .order("ts", { ascending: true }),
   ]);
   if (factsErr) return <p className="text-sm text-red-600">{factsErr.message}</p>;

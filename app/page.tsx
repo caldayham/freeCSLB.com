@@ -1,14 +1,19 @@
 import Link from "next/link";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { createServiceSupabase } from "@/lib/supabase/server";
 import { classifyCoverage, COVERAGE_COLORS, COVERAGE_ORDER } from "@/lib/coverage";
+import { SHARED_USER_ID } from "@/lib/shared-user";
 import type { Coverage } from "@/lib/types";
 
 type ExamRow = { id: string; name: string; description: string | null };
 
-async function getExamRollup(supabase: Awaited<ReturnType<typeof createServerSupabase>>, examId: string) {
+async function getExamRollup(supabase: ReturnType<typeof createServiceSupabase>, examId: string) {
   const [{ data: facts }, { data: states }] = await Promise.all([
     supabase.from("facts").select("id").eq("exam_id", examId),
-    supabase.from("fact_state").select("fact_id, understanding, attempts_count").eq("exam_id", examId),
+    supabase
+      .from("fact_state")
+      .select("fact_id, understanding, attempts_count")
+      .eq("exam_id", examId)
+      .eq("user_id", SHARED_USER_ID),
   ]);
   const stateByFact = new Map<string, { understanding: number; n: number }>();
   for (const s of states ?? [])
@@ -27,19 +32,16 @@ async function getExamRollup(supabase: Awaited<ReturnType<typeof createServerSup
 }
 
 export default async function HomePage() {
-  const supabase = await createServerSupabase();
+  // Zero-auth MVP: everyone is the shared account, served via the service client.
+  const supabase = createServiceSupabase();
   const { data: exams, error } = await supabase.from("exams").select("id, name, description").order("name");
-  const { data: userData } = await supabase.auth.getUser();
-  const signedIn = !!userData.user;
+  const signedIn = true;
 
   if (error) return <p className="text-sm text-red-600">{error.message}</p>;
 
   const examRows = (exams as ExamRow[] | null) ?? [];
 
-  // Only compute rollups for signed-in users (RLS returns no fact_state rows otherwise).
-  const rollups = signedIn
-    ? await Promise.all(examRows.map((e) => getExamRollup(supabase, e.id)))
-    : examRows.map(() => null);
+  const rollups = await Promise.all(examRows.map((e) => getExamRollup(supabase, e.id)));
 
   return (
     <div className="space-y-8">

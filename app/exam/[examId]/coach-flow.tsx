@@ -31,6 +31,60 @@ function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour12: false });
 }
 
+// Minimal structural types for the Web Speech API recognition object — not in
+// lib.dom across all TS configs, so we model just what listen() touches.
+type SpeechRecognitionEventLike = {
+  results: ArrayLike<ArrayLike<{ transcript: string }>>;
+};
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: (e: SpeechRecognitionEventLike) => void;
+  onerror: () => void;
+  onend: () => void;
+  start: () => void;
+  abort: () => void;
+};
+
+/** Map a spoken phrase ("a", "answer B", "the third one") to an option index. */
+function parseSpokenAnswer(raw: string, numOptions: number): number | null {
+  const s = raw.toLowerCase();
+  const letter = s.match(/\b([a-d])\b/);
+  if (letter) {
+    const idx = letter[1].charCodeAt(0) - 97;
+    if (idx < numOptions) return idx;
+  }
+  const words: Record<string, number> = {
+    one: 0, two: 1, three: 2, four: 3,
+    first: 0, second: 1, third: 2, fourth: 3,
+    "1": 0, "2": 1, "3": 2, "4": 3,
+  };
+  for (const [w, idx] of Object.entries(words)) {
+    if (idx < numOptions && new RegExp(`\\b${w}\\b`).test(s)) return idx;
+  }
+  return null;
+}
+
+/** Speak text via the Web Speech API; resolves when done (or immediately if unsupported). */
+function speak(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth) return resolve();
+      synth.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      u.onend = () => resolve();
+      u.onerror = () => resolve();
+      synth.speak(u);
+    } catch {
+      resolve();
+    }
+  });
+}
+
 function formatEvent(e: DebugEvent): string {
   const lines: string[] = [];
   lines.push(`[${fmtTime(e.ts)}] Q ${e.questionExternalId ?? "?"} [${e.pickedBy}]  "${e.questionStem}"`);
@@ -105,6 +159,10 @@ export function CoachFlow({
   const [showLog, setShowLog] = useState(true);
   const [copied, setCopied] = useState(false);
   const [algoId, setAlgoId] = useState(DEFAULT_ALGO_ID);
+  // Audio mode: hands-free voice loop — reads the question, listens for a
+  // spoken answer, reads the verdict + coaching, auto-advances. Repeat.
+  const [audioMode, setAudioMode] = useState(false);
+  const [audioStatus, setAudioStatus] = useState("");
 
   // The top-level coverage rail (rendered by the root layout). We portal the
   // coverage bar into it so the page nav + header align to its left edge.
@@ -119,6 +177,18 @@ export function CoachFlow({
   // Read inside the background log callback — always fresh even if the
   // keyboard handler's closure is stale.
   const algoIdRef = useRef(DEFAULT_ALGO_ID);
+  // Refs the audio loop reads from inside its async closures (where state
+  // would be stale): live `answered`, the prefetched `next`, the active
+  // SpeechRecognition instance.
+  const answeredRef = useRef(false);
+  const nextRef = useRef<CoachQuestion | null>(null);
+  const recognitionRef = useRef<{ abort: () => void } | null>(null);
+  useEffect(() => {
+    answeredRef.current = answered;
+  }, [answered]);
+  useEffect(() => {
+    nextRef.current = next;
+  }, [next]);
 
   const factById = useMemo(() => {
     const m = new Map<string, FactMeta>();
@@ -265,7 +335,8 @@ export function CoachFlow({
   }
 
   function advance() {
-    const nc = next;
+    // Read from the ref so the audio loop's stale closure still advances correctly.
+    const nc = nextRef.current ?? next;
     if (!answered || !nc) return;
     setCurrent(nc);
     setNext(null);
@@ -295,6 +366,150 @@ export function CoachFlow({
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [answered, current, next]);
+
+  // ---- Audio mode: hands-free drill via the Web Speech API ----
+  // listen() captures one spoken phrase. Resolves (never rejects) so the drill
+  // loop can't wedge. Defined in-component because it registers the live
+  // recognition object on recognitionRef for cancellation. speak() is the
+  // module-level helper. iOS needs the first speak() to fire from a user
+  // gesture — the toggle button handles that.
+  function listen(): Promise<string> {
+    return new Promise((resolve) => {
+      const w = window as unknown as {
+        webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+        SpeechRecognition?: new () => SpeechRecognitionLike;
+      };
+      const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+      if (!SR) return resolve("");
+      const rec = new SR();
+      rec.lang = "en-US";
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.maxAlternatives = 3;
+      recognitionRef.current = rec;
+      let heard = "";
+      rec.onresult = (e: SpeechRecognitionEventLike) => {
+        for (let i = 0; i < e.results.length; i++) {
+          for (let j = 0; j < e.results[i].length; j++) {
+            heard += e.results[i][j].transcript + " ";
+          }
+        }
+      };
+      rec.onerror = () => {
+        recognitionRef.current = null;
+        resolve(heard.trim());
+      };
+      rec.onend = () => {
+        recognitionRef.current = null;
+        resolve(heard.trim());
+      };
+      try {
+        rec.start();
+      } catch {
+        resolve("");
+      }
+    });
+  }
+
+  // Question cycle: read the stem + options aloud, then listen for an answer.
+  // Re-runs each time a new question lands (current.id) or audio is toggled on.
+  useEffect(() => {
+    if (!audioMode) return;
+    let cancelled = false;
+    (async () => {
+      if (answeredRef.current) return; // already answered (e.g. manual click)
+      const labels = ["A", "B", "C", "D"];
+      const q =
+        `Question. ${current.stem} ` +
+        current.options.map((o, i) => `${labels[i]}. ${o}.`).join(" ");
+      setAudioStatus("reading question…");
+      await speak(q);
+      while (!cancelled && !answeredRef.current) {
+        setAudioStatus("listening — say A, B, C, or D");
+        const phrase = await listen();
+        if (cancelled || answeredRef.current) return;
+        const idx = parseSpokenAnswer(phrase, current.options.length);
+        if (idx !== null) {
+          setAudioStatus(`heard ${labels[idx]}`);
+          pick(idx);
+          return;
+        }
+        await speak("Sorry, I didn't catch that. Say A, B, C, or D.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try {
+        window.speechSynthesis?.cancel();
+      } catch {
+        /* noop */
+      }
+      recognitionRef.current?.abort();
+      recognitionRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioMode, current.id]);
+
+  // Feedback cycle: once answered, read the verdict + coaching aloud, then
+  // auto-advance as soon as the next question is prefetched.
+  useEffect(() => {
+    if (!audioMode || !answered) return;
+    let cancelled = false;
+    (async () => {
+      const isCorrect = selected === current.correct_index;
+      let verdict = isCorrect ? "Correct." : "Incorrect.";
+      if (!isCorrect) {
+        const coaching = selected !== null ? current.answer_coaching?.[selected] : null;
+        const right = current.options[current.correct_index];
+        verdict += ` The answer is ${String.fromCharCode(65 + current.correct_index)}. ${right}.`;
+        if (coaching) verdict += ` ${coaching}`;
+        if (current.explanation) verdict += ` ${current.explanation}`;
+      }
+      setAudioStatus(isCorrect ? "correct" : "incorrect — here's why");
+      await speak(verdict);
+      if (cancelled) return;
+      setAudioStatus("next question…");
+      for (let i = 0; i < 30 && !cancelled; i++) {
+        if (nextRef.current) {
+          advance();
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioMode, answered, current.id]);
+
+  // Toggling audio off: stop everything immediately.
+  useEffect(() => {
+    if (audioMode) return;
+    try {
+      window.speechSynthesis?.cancel();
+    } catch {
+      /* noop */
+    }
+    recognitionRef.current?.abort();
+    recognitionRef.current = null;
+    setAudioStatus("");
+  }, [audioMode]);
+
+  function toggleAudio() {
+    setAudioMode((on) => {
+      const next = !on;
+      // Prime the speech engine inside this user gesture so iOS allows it.
+      if (next) {
+        try {
+          window.speechSynthesis?.cancel();
+        } catch {
+          /* noop */
+        }
+      }
+      return next;
+    });
+  }
 
   const correct = answered && selected === current.correct_index;
 
@@ -330,6 +545,23 @@ export function CoachFlow({
             </select>
           </label>
         </div>
+
+        {/* Audio mode — hands-free, eyes-free drill. Reads the question + options
+            aloud, listens for a spoken A/B/C/D, reads the verdict, auto-advances. */}
+        <button
+          onClick={toggleAudio}
+          className={[
+            "w-full rounded-lg border px-4 py-3 text-sm font-medium transition",
+            audioMode
+              ? "border-emerald-500 bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"
+              : "border-stone-300 dark:border-stone-700 hover:bg-stone-100 dark:hover:bg-stone-900",
+          ].join(" ")}
+        >
+          {audioMode ? "■ Stop audio mode" : "▶ Audio mode — hands-free"}
+          {audioMode && audioStatus ? (
+            <span className="block text-xs font-normal opacity-70 mt-0.5">{audioStatus}</span>
+          ) : null}
+        </button>
 
         {/* Question */}
         <div className="space-y-5">

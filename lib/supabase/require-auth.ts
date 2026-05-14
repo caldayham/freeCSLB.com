@@ -1,13 +1,13 @@
-import { redirect } from "next/navigation";
-import { createServerSupabase } from "./server";
+import { createServiceSupabase } from "./server";
+import { SHARED_USER_ID } from "@/lib/shared-user";
 
 /**
- * Server-component helper. Returns the current user or redirects to /login.
- * Use at the top of any protected server component or server action.
+ * Zero-auth MVP. Every visitor is the one shared account (see lib/shared-user.ts).
+ * Returns that user + an RLS-bypassing service client, so protected server
+ * components work with no session and no /login redirect.
+ *
+ * To restore real auth: bring back `supabase.auth.getUser()` + redirect("/login").
  */
 export async function requireUser() {
-  const supabase = await createServerSupabase();
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user) redirect("/login");
-  return { user: data.user, supabase };
+  return { user: { id: SHARED_USER_ID }, supabase: createServiceSupabase() };
 }

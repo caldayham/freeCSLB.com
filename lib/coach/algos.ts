@@ -35,6 +35,16 @@ export const ALGOS: Record<string, RankAlgo> = {
       "categorically out-ranks a known one, since it has the most room to gain.",
     scoreOf: (s) => (1 - s.understanding * s.understanding) * s.retrieval,
   },
+  "missed-focus": {
+    id: "missed-focus",
+    label: "Missed-focus",
+    description:
+      "((1 - u) / 2) · retrieval — mass-blind, asymmetric. Unlike the (1 - u²) " +
+      "algos, this is monotonic in u: missed facts (u<0) out-rank unseen (u≈0) " +
+      "out-rank known (u>0). A fact you keep missing keeps coming back hard — " +
+      "retrieval still gates re-showing it too soon.",
+    scoreOf: (s) => ((1 - s.understanding) / 2) * s.retrieval,
+  },
 };
 
 export const DEFAULT_ALGO_ID = "leverage-v1";

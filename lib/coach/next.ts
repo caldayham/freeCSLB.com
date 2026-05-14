@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { rankFacts, type FactScore, type StoredState } from "./scoring";
 import { getAlgo } from "./algos";
+import { SHARED_USER_ID } from "@/lib/shared-user";
 import type { Question } from "@/lib/types";
 
 /** A question plus: the coach's one-line rationale, the ids of every fact it
@@ -36,7 +37,8 @@ async function rankExamFacts(
     supabase
       .from("fact_state")
       .select("fact_id, understanding, attempts_count, last_attempt_at")
-      .eq("exam_id", examId),
+      .eq("exam_id", examId)
+      .eq("user_id", SHARED_USER_ID),
   ]);
   if (factsErr) throw new Error(`facts: ${factsErr.message}`);
   if (statesErr) throw new Error(`fact_state: ${statesErr.message}`);
