@@ -65,7 +65,7 @@ function parseAnswer(transcript: string, numOptions: number): number | null {
     one: 0, two: 1, three: 2, four: 3,
     first: 0, second: 1, third: 2, fourth: 3,
     // common mis-hears of the bare letters
-    ay: 0, eh: 0, hey: 0, bee: 1, be: 1, see: 2, sea: 2, c: 2, dee: 3, de: 3,
+    ay: 0, eh: 0, hey: 0, bee: 1, be: 1, see: 2, sea: 2, dee: 3, de: 3,
   };
   for (const token of t.split(/[^a-z0-9]+/)) {
     if (token in map && map[token] < numOptions) return map[token];
