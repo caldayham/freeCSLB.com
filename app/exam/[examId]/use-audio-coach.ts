@@ -40,7 +40,7 @@ function speak(text: string): Promise<void> {
     if (!synth) return resolve();
     synth.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1;
+    u.rate = 0.85;
     u.onend = () => resolve();
     u.onerror = () => resolve();
     synth.speak(u);
